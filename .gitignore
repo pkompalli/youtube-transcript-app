@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+*.log
+
+# Node.js
+node_modules/
+npm-debug.log*
+.npm
+
+# Expo/React Native
+.expo/
+.expo-shared/
+dist/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+build/
+*.pyc

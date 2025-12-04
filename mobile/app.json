@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "YouTube Transcript Summarizer",
+    "slug": "youtube-transcript-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#667eea"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourtranscript.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#667eea"
+      },
+      "package": "com.yourtranscript.app"
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
+

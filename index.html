@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Transcript Summarizer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📺 YouTube Transcript Summarizer</h1>
+            <p>Get AI-powered summaries of any YouTube video</p>
+        </header>
+
+        <main>
+            <div class="input-section">
+                <input 
+                    type="text" 
+                    id="videoUrl" 
+                    placeholder="Paste YouTube URL here (e.g., https://youtube.com/watch?v=...)"
+                    autocomplete="off"
+                >
+                <button id="summarizeBtn" onclick="summarize()">
+                    <span class="btn-text">Summarize</span>
+                    <span class="loader" style="display: none;"></span>
+                </button>
+            </div>
+
+            <div id="error" class="error" style="display: none;"></div>
+
+            <div id="contentWrapper" style="display: none;">
+                <div id="videoContainer" class="video-container">
+                    <div class="video-wrapper">
+                        <div id="videoFrame"></div>
+                    </div>
+                </div>
+
+                <div id="results" class="results-container">
+                    <div class="result-card">
+                        <h2>📝 Summary</h2>
+                        <div id="summary" class="summary-content"></div>
+                    </div>
+
+                    <div class="result-card transcript-card">
+                        <div class="transcript-header">
+                            <h2>📄 Full Transcript</h2>
+                            <button class="toggle-btn" onclick="toggleTranscript()">
+                                <span id="toggleText">Show</span>
+                            </button>
+                        </div>
+                        <div id="transcript" class="transcript-content" style="display: none;"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Powered by OpenAI GPT-4</p>
+        </footer>
+    </div>
+
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <script>
+        let transcriptVisible = false;
+        let player = null;
+        let videoId = null;
+
+        function onYouTubeIframeAPIReady() {
+            console.log('YouTube API ready');
+        }
+
+        function initializePlayer(vid) {
+            if (player) {
+                player.destroy();
+            }
+            player = new YT.Player('videoFrame', {
+                videoId: vid,
+                playerVars: {
+                    'playsinline': 1,
+                    'enablejsapi': 1,
+                    'origin': window.location.origin
+                },
+                events: {
+                    'onReady': () => console.log('Player ready')
+                }
+            });
+        }
+
+        function seekTo(seconds) {
+            console.log(`Seeking to ${seconds}s`);
+            if (player && typeof player.seekTo === 'function') {
+                player.seekTo(seconds, true);
+                player.playVideo();
+            }
+        }
+
+        async function summarize() {
+            const url = document.getElementById('videoUrl').value.trim();
+            const btn = document.getElementById('summarizeBtn');
+            const btnText = btn.querySelector('.btn-text');
+            const loader = btn.querySelector('.loader');
+            const errorDiv = document.getElementById('error');
+
+            errorDiv.style.display = 'none';
+            document.getElementById('contentWrapper').style.display = 'none';
+
+            if (!url) {
+                showError('Please enter a YouTube URL');
+                return;
+            }
+
+            btn.disabled = true;
+            btnText.style.display = 'none';
+            loader.style.display = 'inline-block';
+
+            try {
+                const response = await fetch('/api/transcript', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to process video');
+                }
+
+                videoId = extractVideoId(url);
+                if (videoId) {
+                    document.getElementById('contentWrapper').style.display = 'block';
+                    
+                    if (typeof YT !== 'undefined' && YT.Player) {
+                        initializePlayer(videoId);
+                    } else {
+                        const checkAPI = setInterval(() => {
+                            if (typeof YT !== 'undefined' && YT.Player) {
+                                clearInterval(checkAPI);
+                                initializePlayer(videoId);
+                            }
+                        }, 100);
+                    }
+                }
+
+                const summaryDiv = document.getElementById('summary');
+                summaryDiv.innerHTML = data.summary;
+                
+                const links = summaryDiv.querySelectorAll('a[href*="&t="]');
+                links.forEach((link) => {
+                    const href = link.getAttribute('href');
+                    const match = href.match(/[?&]t=(\d+)s?/);
+                    if (match) {
+                        const seconds = parseInt(match[1]);
+                        link.href = '#';
+                        link.onclick = (e) => {
+                            e.preventDefault();
+                            seekTo(seconds);
+                            return false;
+                        };
+                    }
+                });
+                
+                document.getElementById('transcript').textContent = data.transcript;
+
+                transcriptVisible = false;
+                document.getElementById('transcript').style.display = 'none';
+                document.getElementById('toggleText').textContent = 'Show';
+
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                btn.disabled = false;
+                btnText.style.display = 'inline';
+                loader.style.display = 'none';
+            }
+        }
+
+        function toggleTranscript() {
+            const transcript = document.getElementById('transcript');
+            const toggleText = document.getElementById('toggleText');
+            
+            transcriptVisible = !transcriptVisible;
+            transcript.style.display = transcriptVisible ? 'block' : 'none';
+            toggleText.textContent = transcriptVisible ? 'Hide' : 'Show';
+        }
+
+        const chatStates = {};
+        let userQuestionCounts = {};
+        let currentQuizData = {};
+        let quizAnswerCounts = {};
+
+        function toggleChat(sectionId) {
+            const chatWindow = document.getElementById(`chat-${sectionId}`);
+            if (chatWindow.style.display === 'none') {
+                chatWindow.style.display = 'block';
+                if (!chatStates[sectionId]) {
+                    chatStates[sectionId] = {
+                        messages: [],
+                        context: getSectionContext(sectionId)
+                    };
+                }
+            } else {
+                chatWindow.style.display = 'none';
+            }
+        }
+
+        function getSectionContext(sectionId) {
+            const section = document.querySelector(`.video-section[data-section-id="${sectionId}"]`);
+            if (!section) return '';
+            
+            const title = section.querySelector('h2')?.textContent || '';
+            const summary = section.querySelector('p')?.textContent || '';
+            
+            return `Section: ${title}\n\nContent: ${summary}`;
+        }
+
+        function askQuestion(sectionId, questionId, button) {
+            button.classList.add('used');
+            const questionText = button.textContent.trim();
+            addChatMessage(sectionId, questionText, 'user');
+            sendQuestionToLLM(sectionId, questionText);
+        }
+
+        function sendMessage(sectionId) {
+            const input = document.getElementById(`chat-input-${sectionId}`);
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            input.value = '';
+            addChatMessage(sectionId, message, 'user');
+            sendQuestionToLLM(sectionId, message);
+        }
+
+        function handleChatEnter(event, sectionId) {
+            if (event.key === 'Enter') {
+                sendMessage(sectionId);
+            }
+        }
+
+        function addChatMessage(sectionId, text, type) {
+            const messagesContainer = document.getElementById(`chat-messages-${sectionId}`);
+            
+            const starterMsg = messagesContainer.querySelector('.chat-starter-message');
+            if (starterMsg) {
+                starterMsg.remove();
+            }
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message ${type}`;
+            messageDiv.textContent = text;
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
+            if (!chatStates[sectionId]) {
+                chatStates[sectionId] = { messages: [], context: getSectionContext(sectionId) };
+            }
+            chatStates[sectionId].messages.push({ role: type === 'user' ? 'user' : 'assistant', content: text });
+        }
+
+        async function sendQuestionToLLM(sectionId, question) {
+            const messagesContainer = document.getElementById(`chat-messages-${sectionId}`);
+            
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'chat-message loading';
+            loadingDiv.textContent = 'Thinking...';
+            messagesContainer.appendChild(loadingDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
+            try {
+                const sectionContext = getSectionContext(sectionId);
+                const conversationHistory = chatStates[sectionId]?.messages || [];
+                
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        section_context: sectionContext,
+                        question: question,
+                        conversation_history: conversationHistory
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to get response');
+                }
+                
+                const data = await response.json();
+                
+                loadingDiv.remove();
+                addChatMessage(sectionId, data.answer, 'assistant');
+                replaceStarterQuestions(sectionId, data.follow_up_questions);
+                
+            } catch (error) {
+                loadingDiv.remove();
+                addChatMessage(sectionId, 'Sorry, there was an error.', 'assistant');
+                console.error('Chat error:', error);
+            }
+        }
+
+        function replaceStarterQuestions(sectionId, newQuestions) {
+            const startersContainer = document.getElementById(`chat-starters-${sectionId}`);
+            if (!startersContainer) return;
+            
+            startersContainer.innerHTML = '';
+            
+            newQuestions.forEach((question, idx) => {
+                const button = document.createElement('button');
+                button.className = 'starter-question-btn';
+                button.textContent = question;
+                button.onclick = function() {
+                    askQuestion(sectionId, idx, this);
+                };
+                startersContainer.appendChild(button);
+            });
+        }
+
+        function startQuiz(sectionId, questionId, button) {
+            const quizData = JSON.parse(button.getAttribute('data-quiz'));
+            currentQuizData[sectionId] = { data: quizData, button: button };
+            
+            const quizArea = document.getElementById(`quiz-area-${sectionId}`);
+            quizArea.style.display = 'block';
+            
+            document.getElementById(`quiz-question-${sectionId}`).textContent = quizData.question;
+            
+            const optionsContainer = document.getElementById(`quiz-options-${sectionId}`);
+            optionsContainer.innerHTML = '';
+            
+            Object.entries(quizData.options).forEach(([letter, text]) => {
+                const optBtn = document.createElement('button');
+                optBtn.className = 'quiz-option-btn';
+                optBtn.textContent = `${letter}) ${text}`;
+                optBtn.onclick = function() {
+                    selectQuizOption(sectionId, letter, this);
+                };
+                optionsContainer.appendChild(optBtn);
+            });
+            
+            document.getElementById(`quiz-input-${sectionId}`).value = '';
+            const feedbackDiv = document.getElementById(`quiz-feedback-${sectionId}`);
+            feedbackDiv.style.display = 'none';
+            feedbackDiv.innerHTML = '';
+        }
+
+        function selectQuizOption(sectionId, letter, button) {
+            document.querySelectorAll(`#quiz-options-${sectionId} .quiz-option-btn`).forEach(btn => {
+                btn.classList.remove('selected');
+            });
+            
+            button.classList.add('selected');
+            submitQuizAnswer(sectionId, letter);
+        }
+
+        function submitCustomAnswer(sectionId) {
+            const input = document.getElementById(`quiz-input-${sectionId}`);
+            const answer = input.value.trim();
+            
+            if (!answer) {
+                alert('Please enter an answer');
+                return;
+            }
+            
+            submitQuizAnswer(sectionId, answer);
+        }
+
+        async function submitQuizAnswer(sectionId, userAnswer) {
+            const quizInfo = currentQuizData[sectionId];
+            if (!quizInfo) return;
+            
+            const quizData = quizInfo.data;
+            const quizButton = quizInfo.button;
+            
+            const feedbackDiv = document.getElementById(`quiz-feedback-${sectionId}`);
+            feedbackDiv.style.display = 'block';
+            feedbackDiv.innerHTML = '<div style="font-style: italic;">Checking answer...</div>';
+            
+            try {
+                const sectionContext = getSectionContext(sectionId);
+                
+                const response = await fetch('/api/quiz/validate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        section_context: sectionContext,
+                        question: quizData.question,
+                        user_answer: userAnswer,
+                        correct_answer: quizData.correct,
+                        explanation: quizData.explanation
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to validate');
+                }
+                
+                const data = await response.json();
+                
+                document.getElementById(`quiz-area-${sectionId}`).style.display = 'none';
+                
+                addQuizMessageToChat(sectionId, quizData.question, 'user');
+                
+                let answerText = userAnswer;
+                if (userAnswer.length === 1) {
+                    answerText = `${userAnswer}) ${quizData.options[userAnswer]}`;
+                }
+                addQuizMessageToChat(sectionId, `My answer: ${answerText}`, 'user');
+                addQuizMessageToChat(sectionId, data.feedback, 'assistant');
+                
+                if (data.is_correct) {
+                    quizButton.classList.add('correct');
+                    quizButton.innerHTML = `✅ ${quizData.question}`;
+                } else {
+                    quizButton.classList.add('incorrect');
+                    quizButton.innerHTML = `❌ ${quizData.question}`;
+                }
+                quizButton.classList.add('used');
+                
+                if (!quizAnswerCounts[sectionId]) {
+                    quizAnswerCounts[sectionId] = 0;
+                }
+                quizAnswerCounts[sectionId]++;
+                
+                if (quizAnswerCounts[sectionId] >= 3) {
+                    updateAllQuestions(sectionId, data.new_user_questions, data.new_quiz_questions);
+                    quizAnswerCounts[sectionId] = 0;
+                }
+                
+            } catch (error) {
+                feedbackDiv.className = 'quiz-feedback incorrect';
+                feedbackDiv.innerHTML = 'Error checking answer.';
+                console.error('Quiz error:', error);
+            }
+        }
+
+        function addQuizMessageToChat(sectionId, text, type) {
+            const messagesContainer = document.getElementById(`chat-messages-${sectionId}`);
+            
+            const starterMsg = messagesContainer.querySelector('.chat-starter-message');
+            if (starterMsg) {
+                starterMsg.remove();
+            }
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message ${type}`;
+            messageDiv.textContent = text;
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function updateAllQuestions(sectionId, newUserQuestions, newQuizQuestions) {
+            const userStartersContainer = document.getElementById(`chat-starters-${sectionId}`);
+            userStartersContainer.innerHTML = '';
+            newUserQuestions.forEach((question, idx) => {
+                const button = document.createElement('button');
+                button.className = 'starter-question-btn';
+                button.textContent = question;
+                button.onclick = function() {
+                    askQuestion(sectionId, idx, this);
+                };
+                userStartersContainer.appendChild(button);
+            });
+            
+            const quizStartersContainer = document.getElementById(`quiz-starters-${sectionId}`);
+            quizStartersContainer.innerHTML = '';
+            newQuizQuestions.forEach((quizQ, idx) => {
+                const button = document.createElement('button');
+                button.className = 'quiz-question-btn';
+                button.textContent = quizQ.question;
+                button.setAttribute('data-quiz', JSON.stringify(quizQ));
+                button.onclick = function() {
+                    startQuiz(sectionId, idx, this);
+                };
+                quizStartersContainer.appendChild(button);
+            });
+        }
+
+        function extractVideoId(url) {
+            const patterns = [
+                /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
+                /youtube\.com\/watch\?.*v=([^&\n?#]+)/,
+            ];
+            
+            for (const pattern of patterns) {
+                const match = url.match(pattern);
+                if (match) return match[1];
+            }
+            return null;
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        document.getElementById('videoUrl').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                summarize();
+            }
+        });
+    </script>
+</body>
+</html>

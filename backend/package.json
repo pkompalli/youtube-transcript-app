@@ -1,0 +1,26 @@
+{
+  "name": "youtube-transcript-backend",
+  "version": "1.0.0",
+  "description": "Node.js backend for YouTube Transcript Summarizer",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": ["youtube", "transcript", "ai", "education"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.1",
+    "axios": "^1.6.2",
+    "youtubei.js": "^9.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+
