@@ -4,6 +4,7 @@ export interface VideoSection {
   timestamp: string;
   timestampSeconds: number;
   summary: string;
+  content: string; // Full section content for AI context
   userQuestions: string[];
   quizQuestions: QuizQuestion[];
 }
@@ -36,4 +37,3 @@ export interface QuizValidationResponse {
   new_user_questions: string[];
   new_quiz_questions: QuizQuestion[];
 }
-

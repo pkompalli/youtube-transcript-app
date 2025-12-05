@@ -157,9 +157,15 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 def create_sections_with_llm(transcript_text: str, transcript_data: list, video_duration: float):
-    """Use LLM to intelligently divide transcript into logical sections"""
+    """
+    User's approach:
+    1. Get transcript (done)
+    2. Ask LLM to divide into logical sections with titles (LLM returns TEXT divisions)
+    3. Find timestamps by matching section text to transcript data (CODE does this)
+    4. Generate summaries later
+    """
     
-    # STEP 2: Determine optimal section count based on video length
+    # STEP 1: Determine optimal section count based on video length
     video_minutes = int(video_duration / 60)
     if video_minutes <= 3:
         target_sections = 3
@@ -172,59 +178,41 @@ def create_sections_with_llm(transcript_text: str, transcript_data: list, video_
     elif video_minutes <= 40:
         target_sections = 12
     else:
-        target_sections = min(20, int(video_minutes / 3))  # ~1 section per 3 minutes for long videos
+        target_sections = min(20, int(video_minutes / 3))
     
     logger.info(f"Video: {video_minutes} minutes, targeting {target_sections} sections")
     
-    # STEP 2: Ask LLM to identify natural break points in the transcript
-    system_prompt = f"""You are analyzing an educational video transcript to find {target_sections-1} natural break points where concepts change.
+    # STEP 2: Ask LLM to divide transcript into logical sections
+    # LLM returns the CONTENT of each section + title (NOT timestamps)
+    system_prompt = f"""You are dividing an educational video transcript into {target_sections} logical sections.
 
-TASK: Identify WHERE the video transitions between different concepts/topics.
+TASK: Split the transcript into {target_sections} coherent sections where each section covers a distinct topic or concept.
 
-You need to find {target_sections-1} break points (which creates {target_sections} sections):
-- Break point 1: Where concept changes from intro to next topic
-- Break point 2: Where next major concept begins
-- etc.
+For each section, provide:
+1. A descriptive TITLE (2-5 words)
+2. The FIRST SENTENCE of that section (exact quote from transcript, 10-20 words)
 
-For each break point:
-1. Find an EXACT QUOTE (5-10 words) where the new concept/topic begins
-2. This should be the FIRST mention of the new topic
+OUTPUT FORMAT (strict JSON array):
+[
+  {{"title": "Introduction", "first_sentence": "exact first sentence of this section from transcript"}},
+  {{"title": "Main Concept", "first_sentence": "exact first sentence of this section from transcript"}},
+  ...
+]
 
-OUTPUT FORMAT (strict):
-BREAK 1
-KEY_PHRASE: "[exact 5-10 word quote where new concept begins]"
+RULES:
+- Return EXACTLY {target_sections} sections
+- first_sentence must be EXACT text from the transcript (this is how we find the timestamp)
+- Titles should be descriptive, 2-5 words
+- Sections should be roughly equal in length
+- Break at natural topic transitions
+- First section starts at the beginning of the transcript"""
 
-BREAK 2
-KEY_PHRASE: "[exact 5-10 word quote where new concept begins]"
+    user_prompt = f"""Divide this {video_minutes}-minute transcript into exactly {target_sections} logical sections.
 
-... (continue for {target_sections-1} break points)
-
-CRITICAL:
-- Find EXACTLY {target_sections-1} break points
-- KEY_PHRASE must be EXACT quotes from transcript
-- Break points should be where concepts naturally change
-- Section 1 starts at beginning (timestamp 0), so first break is AFTER section 1"""
-
-    # Create detailed timestamp reference with 30-second intervals
-    timestamp_reference = "\n\nTIMESTAMP MARKERS (use these for accuracy):\n"
-    for i in range(0, int(video_duration), 30):  # Every 30 seconds
-        # Find closest segment to this timestamp
-        closest = min(transcript_data, key=lambda x: abs(x['start'] - i))
-        timestamp_reference += f"{i}s: {closest['text'][:70]}...\n"
-    
-    user_prompt = f"""Find {target_sections-1} natural break points in this {video_minutes}-minute transcript.
-
-FULL TRANSCRIPT:
+TRANSCRIPT:
 {transcript_text}
 
-YOUR TASK:
-1. Read the transcript carefully
-2. Find {target_sections-1} places where the topic CHANGES
-3. For each break, provide an EXACT QUOTE (5-10 words) from where new topic begins
-
-This creates {target_sections} sections total.
-
-Return {target_sections-1} break points."""
+Return a JSON array with {target_sections} sections. Each needs "title" and "first_sentence" (exact quote)."""
 
     try:
         response = client.chat.completions.create(
@@ -233,180 +221,98 @@ Return {target_sections-1} break points."""
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2,  # Very low for consistent formatting
-            max_tokens=2000  # Enough for detailed response
+            temperature=0.3,
+            max_tokens=2000
         )
         
         llm_response = response.choices[0].message.content.strip()
-        logger.info(f"LLM sections response length: {len(llm_response)}")
-        logger.info(f"LLM response:\n{llm_response[:500]}\n...")
+        logger.info(f"LLM sections response:\n{llm_response}")
         
-        # Parse the LLM response to extract break points
-        break_points = []
-        break_blocks = re.split(r'BREAK\s+\d+', llm_response, flags=re.IGNORECASE)
+        # Parse JSON response
+        json_match = re.search(r'\[[\s\S]*\]', llm_response)
+        if not json_match:
+            logger.error("No JSON array found in response")
+            return create_logical_sections_fallback(transcript_data, target_sections)
         
-        logger.info(f"Split into {len(break_blocks)} blocks")
+        try:
+            llm_sections = json.loads(json_match.group())
+            logger.info(f"✅ Parsed {len(llm_sections)} sections from JSON")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error: {e}")
+            return create_logical_sections_fallback(transcript_data, target_sections)
         
-        for idx, block in enumerate(break_blocks[1:]):  # Skip first empty split
-            block = block.strip()
-            if not block:
-                continue
-            
-            logger.info(f"\nParsing break {idx+1}:")
-            
-            # Extract key phrase for this break point
-            key_phrase_match = re.search(r'KEY_PHRASE:\s*["\']?(.+?)["\']?(?=\n|$)', block, re.IGNORECASE | re.DOTALL)
-            key_phrase = key_phrase_match.group(1).strip() if key_phrase_match else None
-            if key_phrase:
-                key_phrase = key_phrase.strip('"\'').split('\n')[0].strip()
-            logger.info(f"  Key phrase: '{key_phrase}'")
-            
-            if key_phrase and len(key_phrase) > 5:
-                break_points.append(key_phrase)
-                logger.info(f"  ✅ Break {idx+1} added")
-            else:
-                logger.warning(f"  ❌ Invalid key phrase")
+        # STEP 3: Find timestamps by matching first_sentence to transcript data
+        # This is done by CODE, not LLM - much more accurate!
+        logger.info("\nSTEP 3: Finding timestamps by text matching...")
         
-        logger.info(f"\n✅ Found {len(break_points)} break points (target was {target_sections-1})")
-        
-        # STEP 3: Find actual timestamps for each break point
-        logger.info("\nSTEP 3: Finding timestamps for break points...")
-        timestamps = [0]  # First section always starts at 0
-        
-        for bp_idx, key_phrase in enumerate(break_points):
-            logger.info(f"\n  Searching for break {bp_idx+1}: '{key_phrase}'")
-            key_phrase_lower = key_phrase.lower()
-            phrase_words = [w for w in key_phrase_lower.split() if len(w) > 2]  # Skip short words
-            
-            best_match_idx = None
-            best_score = 0
-            best_position = None
-            all_matches = []  # Track all potential matches
-            
-            # Search transcript for this phrase - check multiple consecutive segments
-            for idx in range(len(transcript_data) - 2):
-                # Check this segment and next 2 segments (phrases might span segments)
-                combined_text = " ".join([
-                    transcript_data[idx + j]['text'].lower() 
-                    for j in range(min(3, len(transcript_data) - idx))
-                ])
-                
-                # Count matching words
-                matches = sum(1 for word in phrase_words if word in combined_text)
-                score = matches / len(phrase_words) if phrase_words else 0
-                
-                # Also check if phrase appears as substring (fuzzy match)
-                if key_phrase_lower in combined_text:
-                    score = max(score, 0.95)  # High score for exact substring match
-                
-                # Track all matches above threshold for debugging
-                if score > 0.4:
-                    timestamp = transcript_data[idx]['start']
-                    all_matches.append({
-                        'idx': idx,
-                        'score': score,
-                        'timestamp': timestamp,
-                        'text': combined_text[:80]
-                    })
-                
-                if score > best_score:
-                    best_score = score
-                    best_match_idx = idx
-                    best_position = combined_text[:100]
-            
-            # Log all potential matches for debugging
-            if len(all_matches) > 1:
-                logger.info(f"     Found {len(all_matches)} potential matches:")
-                for match in sorted(all_matches, key=lambda x: -x['score'])[:3]:
-                    logger.info(f"       {int(match['timestamp'])}s (score: {match['score']:.0%}): {match['text']}...")
-            
-            if best_match_idx is not None and best_score >= 0.4:
-                # Don't adjust timestamp - use exact position where phrase is found
-                actual_timestamp = int(transcript_data[best_match_idx]['start'])
-                timestamps.append(actual_timestamp)
-                logger.info(f"  ✅ Break {bp_idx+1} at {actual_timestamp}s (match: {best_score:.0%})")
-                logger.info(f"     Content: {best_position}...")
-            else:
-                # Fallback: distribute evenly
-                fallback_time = int((bp_idx + 1) * video_duration / target_sections)
-                timestamps.append(fallback_time)
-                logger.warning(f"  ⚠️ Break {bp_idx+1} not found, fallback: {fallback_time}s")
-        
-        timestamps.sort()  # Ensure in order
-        logger.info(f"Timestamps: {timestamps}")
-        
-        # STEP 4: Create sections based on these timestamps
-        logger.info("\nSTEP 4: Creating sections from timestamps...")
         sections = []
         
-        for i in range(len(timestamps)):
-            section_start = timestamps[i]
-            section_end = timestamps[i + 1] if i < len(timestamps) - 1 else video_duration
+        for idx, llm_section in enumerate(llm_sections):
+            title = llm_section.get('title', f'Section {idx+1}')
+            first_sentence = llm_section.get('first_sentence', '').lower().strip()
             
-            # Extract content for this section
-            section_content = " ".join([
-                seg['text'] for seg in transcript_data 
-                if section_start <= seg['start'] < section_end
-            ])
+            # Find this sentence in transcript_data
+            best_match_idx = 0
+            best_score = 0
             
-            sections.append({
-                'timestamp': section_start,
-                'content': section_content,
-                'header': None,  # Will be generated in step 5
-                'summary': None  # Will be generated in step 5
-            })
+            # Clean up the search phrase
+            search_words = [w for w in first_sentence.split() if len(w) > 2]
             
-            logger.info(f"  Section {i+1}: {section_start}s → {int(section_end)}s, {len(section_content)} chars")
-        
-        logger.info(f"✅ Created {len(sections)} sections")
-        
-        # If we got fewer sections than target, try fallback
-        if len(sections) < target_sections:
-            logger.warning(f"⚠️ Got only {len(sections)} sections, expected {target_sections}")
+            if search_words:
+                for i in range(len(transcript_data)):
+                    # Check this segment and next 3 segments (sentences span segments)
+                    combined_text = " ".join([
+                        transcript_data[i + j]['text'].lower()
+                        for j in range(min(4, len(transcript_data) - i))
+                    ])
+                    
+                    # Count matching words
+                    matches = sum(1 for word in search_words if word in combined_text)
+                    score = matches / len(search_words)
+                    
+                    # Exact substring match gets highest score
+                    if first_sentence in combined_text:
+                        score = 1.0
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match_idx = i
             
-            # If we got less than half of target, use fallback
-            if len(sections) < target_sections // 2 or len(sections) < 2:
-                logger.warning("Too few sections, using fallback method")
-                return create_logical_sections_fallback(transcript_data, target_sections)
-        
-        # Ensure timestamps are sorted
-        sections.sort(key=lambda x: x['timestamp'])
-        
-        # STEP 3: Find ACTUAL timestamps by searching for key phrases
-        logger.info("\nSTEP 3: Finding precise timestamps using key phrases...")
-        
-        for i, section in enumerate(sections):
-            key_phrase = section['key_phrase'].lower()
-            concept = section['concept']
-            
-            # Search for this exact phrase in the transcript
-            best_match_idx = None
-            best_match_score = 0
-            
-            for idx, seg in enumerate(transcript_data):
-                seg_text = seg['text'].lower()
-                
-                # Calculate similarity: how many words from key phrase appear in this segment
-                phrase_words = key_phrase.split()
-                matches = sum(1 for word in phrase_words if word in seg_text)
-                score = matches / len(phrase_words) if phrase_words else 0
-                
-                if score > best_match_score and score > 0.5:  # At least 50% word match
-                    best_match_score = score
-                    best_match_idx = idx
-            
-            # If we found a match, use that timestamp
-            if best_match_idx is not None:
-                actual_timestamp = int(transcript_data[best_match_idx]['start'])
-                section['timestamp'] = actual_timestamp
-                logger.info(f"  🎯 Found '{concept}' at {actual_timestamp}s (match: {best_match_score:.0%})")
-                logger.info(f"     Text: {transcript_data[best_match_idx]['text'][:80]}")
+            # Get timestamp from matched segment
+            if best_score >= 0.5:
+                timestamp = int(transcript_data[best_match_idx]['start'])
+                logger.info(f"  ✅ '{title}' → {timestamp}s (match: {best_score:.0%})")
             else:
                 # Fallback: distribute evenly
-                section['timestamp'] = int((i / len(sections)) * video_duration)
-                logger.warning(f"  ⚠️ Could not find '{key_phrase}', using fallback: {section['timestamp']}s")
+                timestamp = int(idx * video_duration / len(llm_sections))
+                logger.warning(f"  ⚠️ '{title}' → {timestamp}s (fallback, low match: {best_score:.0%})")
             
-            # STEP 4: Extract content from this timestamp to next section
+            sections.append({
+                'timestamp': timestamp,
+                'title': title,
+                'content': None  # Will be filled next
+            })
+        
+        # Ensure first section starts at 0
+        if sections and sections[0]['timestamp'] > 5:
+            sections[0]['timestamp'] = 0
+        
+        # Sort by timestamp
+        sections = sorted(sections, key=lambda x: x['timestamp'])
+        
+        # Remove duplicate timestamps (keep first)
+        seen = set()
+        unique_sections = []
+        for s in sections:
+            if s['timestamp'] not in seen:
+                seen.add(s['timestamp'])
+                unique_sections.append(s)
+        sections = unique_sections
+        
+        # STEP 4: Extract content for each section based on timestamps
+        logger.info("\nSTEP 4: Extracting content for each section...")
+        
+        for i, section in enumerate(sections):
             section_start = section['timestamp']
             section_end = sections[i + 1]['timestamp'] if i < len(sections) - 1 else video_duration
             
@@ -416,14 +322,20 @@ Return {target_sections-1} break points."""
             ])
             
             section['content'] = section_content
-            logger.info(f"  Content: {section_start}s → {int(section_end)}s ({len(section_content)} chars)")
+            logger.info(f"  Section {i+1}: {section_start}s → {int(section_end)}s ({len(section_content)} chars)")
         
-        logger.info(f"✅ Returning {len(sections)} sections with precise timestamps")
+        if len(sections) < 2:
+            logger.warning("Too few sections, using fallback")
+            return create_logical_sections_fallback(transcript_data, target_sections)
+        
+        logger.info(f"✅ Returning {len(sections)} sections")
         return sections
         
     except Exception as e:
         logger.error(f"LLM section creation failed: {e}")
-        return create_logical_sections_fallback(transcript_data)
+        import traceback
+        traceback.print_exc()
+        return create_logical_sections_fallback(transcript_data, target_sections)
 
 
 def create_logical_sections_fallback(transcript_data: list, target_count: int = 4):
@@ -459,14 +371,9 @@ def create_logical_sections_fallback(transcript_data: list, target_count: int = 
                 break
             section_content += item['text'] + " "
         
-        # Simple header: first few words
-        sentences = [s.strip() for s in section_content.split('.') if s.strip()]
-        header_words = sentences[0].split()[:3] if sentences else [f"Section", f"{i+1}"]
-        header = ' '.join(header_words)
-        
         sections.append({
             'timestamp': int(transcript_data[closest_idx]['start']),
-            'header': header,
+            'title': None,  # Will be generated later
             'content': section_content
         })
     
@@ -736,10 +643,15 @@ def summarize_text(text: str, transcript_data: list, video_id: str) -> str:
         
         try:
             section_start_time = section_data['timestamp']
-            section_content = section_data['content']
+            section_content = section_data.get('content', '')
             
-            # First, analyze content to create natural header
-            header_prompt = f"""This is section {i+1} of {len(sections_data)} from an educational video. Read the content and create a natural, descriptive header.
+            # Use title from LLM if provided, otherwise generate one
+            if section_data.get('title'):
+                section_header = section_data['title']
+                logger.info(f"  📌 Using LLM title: '{section_header}'")
+            else:
+                # Generate header from content
+                header_prompt = f"""This is section {i+1} of {len(sections_data)} from an educational video. Read the content and create a natural, descriptive header.
 
 REQUIREMENTS:
 - 2-4 words that flow naturally
@@ -765,18 +677,18 @@ SECTION CONTENT:
 
 Return ONLY the header (2-4 words, no quotes, no explanation)."""
 
-            header_response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Create natural, descriptive headers that flow well in sequence."},
-                    {"role": "user", "content": header_prompt}
-                ],
-                temperature=0.6,
-                max_tokens=25
-            )
-            
-            section_header = header_response.choices[0].message.content.strip().strip('"\'').strip('.')
-            logger.info(f"  📌 Header: '{section_header}'")
+                header_response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Create natural, descriptive headers that flow well in sequence."},
+                        {"role": "user", "content": header_prompt}
+                    ],
+                    temperature=0.6,
+                    max_tokens=25
+                )
+                
+                section_header = header_response.choices[0].message.content.strip().strip('"\'').strip('.')
+                logger.info(f"  📌 Generated header: '{section_header}'")
             
             # Then, summarize the section
             summary_prompt = f"""Summarize this section in 30-40 words.

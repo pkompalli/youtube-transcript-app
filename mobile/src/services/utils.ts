@@ -55,6 +55,7 @@ export const parseSummaryHTML = (html: string): VideoSection[] => {
       timestamp,
       timestampSeconds,
       summary: summary || 'No summary',
+      content: summary || 'No content', // Store full content for AI context
       userQuestions: userQuestions.slice(0, 3),
       quizQuestions: quizQuestions.slice(0, 3),
     });
@@ -71,10 +72,10 @@ export const parseTimestamp = (timestamp: string): number => {
 };
 
 export const getSectionContext = (section: VideoSection): string => {
-  return `Section: ${section.timestamp} - ${section.title}\n\nContent: ${section.summary}`;
+  // Use the full content for better AI context (matches web behavior)
+  return `Section: ${section.timestamp} - ${section.title}\n\nContent: ${section.content || section.summary}`;
 };
 
 export const isValidYouTubeUrl = (url: string): boolean => {
   return extractVideoId(url) !== null;
 };
-

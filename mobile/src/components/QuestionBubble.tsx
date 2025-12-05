@@ -45,3 +45,4 @@ const styles = StyleSheet.create({
   text: { fontSize: FontSizes.sm, fontWeight: FontWeights.medium },
 });
 
+

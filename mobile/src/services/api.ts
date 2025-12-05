@@ -1,12 +1,29 @@
 import axios from 'axios';
 import { TranscriptResponse, ChatResponse, QuizValidationResponse } from '../types';
+import { Platform } from 'react-native';
 
-const API_BASE_URL = 'http://localhost:3000';
+// API URL configuration
+// - For iOS simulator: use localhost
+// - For Android emulator: use 10.0.2.2 (Android's localhost alias)
+// - For physical devices: use your computer's IP address
+const getBaseUrl = () => {
+  if (__DEV__) {
+    // Development mode
+    if (Platform.OS === 'android') {
+      return 'http://10.0.2.2:8000'; // Android emulator localhost
+    }
+    return 'http://localhost:8000'; // iOS simulator or web
+  }
+  // Production - replace with your actual server URL
+  return 'http://localhost:8000';
+};
+
+const API_BASE_URL = getBaseUrl();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: { 'Content-Type': 'application/json' },
-  timeout: 60000,
+  timeout: 120000, // 2 min timeout for long transcripts
 });
 
 export const ApiService = {
@@ -37,4 +54,3 @@ export const ApiService = {
 };
 
 export default ApiService;
-
