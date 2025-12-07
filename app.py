@@ -4,7 +4,8 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+import asyncio
 from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 try:
@@ -59,6 +60,13 @@ class QuizAnswerRequest(BaseModel):
     user_answer: str
     correct_answer: str
     explanation: str
+
+class SectionBatchRequest(BaseModel):
+    video_id: str
+    sections: list  # List of {index, timestamp, title, content}
+
+# In-memory cache for transcript data (in production, use Redis)
+transcript_cache = {}
 
 def extract_video_id(url: str) -> str:
     patterns = [
@@ -613,6 +621,156 @@ Create 3 multiple-choice quiz questions that test understanding of THIS SPECIFIC
             'explanation': 'Based on content.'
         }] * 3
 
+def generate_loading_messages(subject: str, section_titles: list) -> list:
+    """Generate fun, topic-specific loading messages using LLM."""
+    try:
+        titles_str = ", ".join(section_titles[:5])  # Use first 5 titles
+        
+        prompt = f"""Generate 8 fun, encouraging loading messages for a medical student studying: "{subject}"
+Topics covered: {titles_str}
+
+Requirements:
+- Each message should be 10-20 words
+- Be encouraging, fun, slightly humorous
+- Reference the actual subject matter when possible
+- Mix of: progress updates, encouragement, fun facts, motivation
+- Appropriate for med students preparing for exams
+
+Format: Return ONLY a JSON array of strings, no other text.
+Example: ["Message 1", "Message 2", ...]"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            max_tokens=400
+        )
+        
+        # Parse JSON array
+        content = response.choices[0].message.content.strip()
+        messages = json.loads(content)
+        logger.info(f"Generated {len(messages)} custom loading messages")
+        return messages
+        
+    except Exception as e:
+        logger.warning(f"Failed to generate custom messages: {e}")
+        return []
+
+
+def generate_section_html(section_data: dict, section_index: int, total_sections: int, video_id: str, generate_quiz: bool = True) -> str:
+    """Generate HTML for a single section. Quiz generation can be deferred for faster loading."""
+    try:
+        section_start_time = section_data['timestamp']
+        section_content = section_data.get('content', '')
+        section_header = section_data.get('title', f'Section {section_index + 1}')
+        
+        # Generate summary
+        summary_prompt = f"""Summarize this section in 30-40 words.
+
+Topic: {section_header}
+
+Content:
+{section_content}
+
+REQUIREMENTS:
+- 30-40 words (2-3 sentences)
+- Focus on essentials only
+- Include key facts and mechanisms
+- Be concise and complete
+
+Write 30-40 words."""
+
+        summary_response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Create brief 30-40 word summaries for educational content."},
+                {"role": "user", "content": summary_prompt}
+            ],
+            temperature=0.5,
+            max_tokens=120
+        )
+        
+        section_summary = summary_response.choices[0].message.content.strip()
+        section_summary = re.sub(r'^(TITLE|SUMMARY|HEADER|CONCEPT):\s*', '', section_summary, flags=re.IGNORECASE).strip()
+        
+        logger.info(f"  Section {section_index + 1}: Summary generated ({len(section_summary.split())} words)")
+        
+        # Build HTML
+        timestamp_seconds = int(section_start_time)
+        timestamp_display = format_timestamp(section_start_time)
+        section_display_title = f"{timestamp_display} - {section_header}"
+        i = section_index
+        
+        if generate_quiz:
+            # Full generation with questions and quiz
+            questions = generate_section_questions(section_summary, section_header)
+            quiz_questions = generate_quiz_questions(section_summary, section_header)
+            
+            questions_html = f'<div class="chat-container" data-section-id="{i}">'
+            questions_html += f'<button class="chat-toggle-btn" onclick="toggleChat({i})"><span class="chat-icon">💬</span></button>'
+            questions_html += f'<div class="chat-window" id="chat-{i}" style="display: none;">'
+            questions_html += f'<div class="chat-header"><span>Ask a question</span><button class="chat-close-btn" onclick="toggleChat({i})">×</button></div>'
+            questions_html += f'<div class="chat-messages" id="chat-messages-{i}"><div class="chat-starter-message">Choose a question to start the conversation:</div></div>'
+            questions_html += '<div class="chat-starters-wrapper"><div class="starters-label">💭 Ask the AI:</div>'
+            questions_html += f'<div class="chat-starters" id="chat-starters-{i}">'
+            
+            for q_idx, question in enumerate(questions):
+                questions_html += f'<button class="starter-question-btn" onclick="askQuestion({i}, {q_idx}, this)">{question}</button>'
+            
+            questions_html += '</div><div class="starters-label">🎯 Test yourself:</div>'
+            questions_html += f'<div class="quiz-starters" id="quiz-starters-{i}">'
+            
+            for q_idx, quiz_q in enumerate(quiz_questions):
+                escaped_quiz = json.dumps(quiz_q).replace('"', '&quot;')
+                questions_html += f'<button class="quiz-question-btn" onclick="startQuiz({i}, {q_idx}, this)" data-quiz="{escaped_quiz}">{quiz_q["question"]}</button>'
+            
+            questions_html += '</div></div>'
+            questions_html += f'<div class="quiz-area" id="quiz-area-{i}" style="display: none;">'
+            questions_html += f'<div class="quiz-question-text" id="quiz-question-{i}"></div>'
+            questions_html += f'<div class="quiz-options" id="quiz-options-{i}"></div>'
+            questions_html += f'<div class="quiz-custom-answer" id="quiz-custom-{i}">'
+            questions_html += f'<input type="text" class="quiz-input" id="quiz-input-{i}" placeholder="Or type your answer...">'
+            questions_html += f'<button class="quiz-submit-btn" onclick="submitCustomAnswer({i})">Submit</button>'
+            questions_html += '</div>'
+            questions_html += f'<div class="quiz-feedback" id="quiz-feedback-{i}" style="display: none;"></div>'
+            questions_html += '</div>'
+            questions_html += f'<div class="chat-input-area">'
+            questions_html += f'<input type="text" class="chat-input" id="chat-input-{i}" placeholder="Type your question..." onkeypress="handleChatEnter(event, {i})">'
+            questions_html += f'<button class="chat-send-btn" onclick="sendMessage({i})">Send</button>'
+            questions_html += '</div></div></div>'
+            
+            has_quiz_attr = 'data-has-quiz="true"'
+        else:
+            # On-demand generation - clickable headers that generate questions when clicked
+            questions_html = f'''<div class="on-demand-container" data-section-id="{i}">
+                <div class="expandable-section" id="ask-ai-section-{i}">
+                    <button class="section-header-btn" onclick="toggleAskAI({i})">
+                        <span>💭 Ask AI</span>
+                        <span class="expand-icon" id="ask-ai-icon-{i}">▶</span>
+                        <span class="header-loader" id="ask-ai-loader-{i}" style="display: none;"></span>
+                    </button>
+                    <div class="questions-container" id="ask-ai-questions-{i}" style="display: none;"></div>
+                </div>
+                <div class="expandable-section" id="ask-me-section-{i}">
+                    <button class="section-header-btn" onclick="toggleAskMe({i})">
+                        <span>🎯 Ask Me</span>
+                        <span class="expand-icon" id="ask-me-icon-{i}">▶</span>
+                        <span class="header-loader" id="ask-me-loader-{i}" style="display: none;"></span>
+                    </button>
+                    <div class="questions-container" id="ask-me-questions-{i}" style="display: none;"></div>
+                </div>
+            </div>'''
+            has_quiz_attr = 'data-has-quiz="false"'
+        
+        section_html = f'<div class="video-section loaded" data-section-id="{i}" {has_quiz_attr} data-content="{section_content[:500].replace(chr(34), "&quot;")}" data-title="{section_header}"><h2><a href="https://www.youtube.com/watch?v={video_id}&t={timestamp_seconds}s">{section_display_title}</a></h2><p>{section_summary}</p>{questions_html}</div>'
+        
+        return section_html
+        
+    except Exception as e:
+        logger.error(f"Failed to generate section {section_index + 1}: {e}")
+        return f'<div class="video-section error" data-section-id="{section_index}"><p>Failed to load section</p></div>'
+
+
 def summarize_text(text: str, transcript_data: list, video_id: str) -> str:
     logger.info(f"Starting summarization - {len(transcript_data)} segments")
     
@@ -788,21 +946,215 @@ Write 30-40 words."""
 async def read_root():
     return FileResponse("index.html")
 
+@app.post("/api/video-metadata")
+async def get_video_metadata(request: VideoRequest):
+    """
+    Gets section titles and generates content-specific loading messages.
+    This does transcript + section analysis, then caches for the main request.
+    """
+    logger.info(f"Metadata request: {request.url}")
+    try:
+        video_id = extract_video_id(request.url)
+        logger.info(f"Video ID: {video_id}")
+        
+        # Get video title quickly via oEmbed
+        video_title = get_video_title_fast(video_id)
+        logger.info(f"Video title: {video_title}")
+        
+        # Fetch transcript and create sections (this gives us section titles)
+        transcript_text, transcript_data = get_transcript(video_id)
+        logger.info(f"Transcript fetched: {len(transcript_text)} chars")
+        
+        # Calculate video duration
+        if transcript_data:
+            last_item = transcript_data[-1]
+            video_duration = last_item['start'] + last_item.get('duration', 0)
+        else:
+            video_duration = 0
+        
+        # Get section metadata from LLM - this gives us the actual topics!
+        sections_data = create_sections_with_llm(transcript_text, transcript_data, video_duration)
+        section_titles = [s.get('title', f'Section {i+1}') for i, s in enumerate(sections_data)]
+        logger.info(f"Section titles: {section_titles}")
+        
+        # Cache for the main transcript request (saves re-processing)
+        transcript_cache[video_id] = {
+            'sections': sections_data,
+            'transcript_text': transcript_text
+        }
+        
+        # Generate loading messages based on ACTUAL section content
+        loading_messages = generate_section_based_messages(video_title, section_titles)
+        
+        return {
+            "video_id": video_id,
+            "video_title": video_title,
+            "section_titles": section_titles,
+            "total_sections": len(sections_data),
+            "loading_messages": loading_messages,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Metadata error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_video_title_fast(video_id: str) -> str:
+    """Get video title quickly using YouTube oEmbed (no API key needed)."""
+    try:
+        import urllib.request
+        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        with urllib.request.urlopen(url, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            return data.get('title', 'Educational Video')
+    except Exception as e:
+        logger.warning(f"Could not fetch video title: {e}")
+        return "Educational Video"
+
+
+def generate_section_based_messages(video_title: str, section_titles: list) -> list:
+    """Generate sophisticated, content-specific loading messages for medical students."""
+    try:
+        sections_str = ", ".join(section_titles[:8])
+        
+        prompt = f"""You're creating loading screen messages for a medical education app.
+
+Video: "{video_title}"
+Topics covered: {sections_str}
+
+Generate 12 loading messages that:
+1. Reference SPECIFIC concepts from the section titles above
+2. Include relevant clinical pearls, board-style facts, or mechanism insights
+3. Are written for medical students (USMLE-level sophistication)
+4. Mix high-yield facts with the specific topics being covered
+5. Are 12-20 words each
+6. NO generic "loading" or "processing" language
+
+Examples of GOOD messages (specific, clinical, sophisticated):
+- "Reviewing membrane transport? Remember: Na+/K+-ATPase uses 30% of cellular ATP 🔬"
+- "Cell signaling coming up: G-proteins are GTPases - hydrolysis = signal termination"
+- "Cardiac cycle insight: S1 from AV valve closure, S2 from semilunar valve closure"
+- "Renal physiology: PCT reabsorbs 65% of filtered Na+ - highest of any segment"
+
+Examples of BAD messages (generic, too simple):
+- "Learning about cells!"
+- "Almost done loading..."
+- "This is exciting stuff!"
+
+Return ONLY a JSON array of 12 strings. Reference the ACTUAL topics: {sections_str}"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=700
+        )
+        
+        content = response.choices[0].message.content.strip()
+        # Handle potential markdown code blocks
+        if '```' in content:
+            content = content.split('```')[1]
+            if content.startswith('json'):
+                content = content[4:]
+            content = content.strip()
+        messages = json.loads(content)
+        logger.info(f"Generated {len(messages)} section-based loading messages")
+        return messages
+        
+    except Exception as e:
+        logger.warning(f"Failed to generate section-based messages: {e}")
+        # Fallback using actual section titles
+        fallback = []
+        for title in section_titles[:6]:
+            fallback.append(f"Preparing section: {title}...")
+        fallback.extend([
+            f"Analyzing: {video_title[:40]}...",
+            "Extracting high-yield concepts...",
+        ])
+        return fallback
+
 @app.post("/api/transcript")
 async def get_transcript_summary(request: VideoRequest):
+    """
+    Progressive loading approach:
+    1. Fast response with section metadata + first batch of rendered sections
+    2. Client can request remaining sections via /api/sections/batch
+    
+    Uses cached data from /api/video-metadata if available.
+    """
     logger.info(f"Transcript request: {request.url}")
     try:
         video_id = extract_video_id(request.url)
         logger.info(f"Video ID: {video_id}")
         
-        transcript_text, transcript_data = get_transcript(video_id)
-        logger.info(f"Transcript fetched: {len(transcript_text)} chars, {len(transcript_data)} segments")
+        # Check if we have cached data from metadata endpoint
+        cached = transcript_cache.get(video_id)
+        if cached and 'sections' in cached and 'transcript_text' in cached:
+            logger.info(f"Using cached metadata for {video_id}")
+            sections_data = cached['sections']
+            transcript_text = cached['transcript_text']
+        else:
+            # Fetch fresh if not cached
+            transcript_text, transcript_data = get_transcript(video_id)
+            logger.info(f"Transcript fetched: {len(transcript_text)} chars, {len(transcript_data)} segments")
+            
+            # Calculate video duration
+            if transcript_data:
+                last_item = transcript_data[-1]
+                video_duration = last_item['start'] + last_item.get('duration', 0)
+            else:
+                video_duration = 0
+            
+            # Get section metadata from LLM
+            sections_data = create_sections_with_llm(transcript_text, transcript_data, video_duration)
+            
+            # Cache for future use
+            transcript_cache[video_id] = {
+                'sections': sections_data,
+                'transcript_text': transcript_text
+            }
         
-        summary = summarize_text(transcript_text, transcript_data, video_id)
+        total_sections = len(sections_data)
+        logger.info(f"Using {total_sections} sections")
+        
+        # Get section titles
+        section_titles = [s.get('title', f'Section {i+1}') for i, s in enumerate(sections_data)]
+        subject = section_titles[0] if section_titles else "this video"
+        
+        # Generate sections - NO quiz pre-generation (all on-demand now)
+        logger.info(f"Generating {total_sections} sections (summary only, quiz on-demand)...")
+        
+        all_sections_html = []
+        for i in range(total_sections):
+            logger.info(f"Generating section {i + 1}/{total_sections}...")
+            html = generate_section_html(sections_data[i], i, total_sections, video_id, generate_quiz=False)
+            all_sections_html.append(html)
+        
+        final_html = "".join(all_sections_html)
+        
+        # Build section metadata (all loaded)
+        sections_meta = []
+        for i, section in enumerate(sections_data):
+            sections_meta.append({
+                'index': i,
+                'timestamp': section['timestamp'],
+                'title': section.get('title', f'Section {i + 1}'),
+                'loaded': True
+            })
+        
+        logger.info(f"🎉 Generated all {total_sections} sections, {len(final_html)} chars")
         
         return {
-            "summary": summary,
-            "transcript": transcript_text
+            "summary": final_html,
+            "transcript": transcript_text,
+            "video_id": video_id,
+            "total_sections": total_sections,
+            "loaded_sections": total_sections,
+            "sections_meta": sections_meta,
+            "section_titles": section_titles,
+            "subject": subject
         }
         
     except HTTPException:
@@ -810,6 +1162,150 @@ async def get_transcript_summary(request: VideoRequest):
     except Exception as e:
         logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/transcript/stream")
+async def get_transcript_summary_stream(request: VideoRequest):
+    """
+    Streaming version that sends progress updates via Server-Sent Events.
+    """
+    async def generate_stream():
+        try:
+            # Send initial progress
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'init', 'message': 'Starting...', 'progress': 0})}\n\n"
+            
+            video_id = extract_video_id(request.url)
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'transcript', 'message': 'Fetching transcript...', 'progress': 5})}\n\n"
+            
+            transcript_text, transcript_data = get_transcript(video_id)
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'transcript', 'message': f'Transcript loaded ({len(transcript_data)} segments)', 'progress': 15})}\n\n"
+            
+            # Calculate video duration
+            if transcript_data:
+                last_item = transcript_data[-1]
+                video_duration = last_item['start'] + last_item.get('duration', 0)
+            else:
+                video_duration = 0
+            
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'sections', 'message': 'Analyzing content structure...', 'progress': 20})}\n\n"
+            
+            # Get section metadata
+            sections_data = create_sections_with_llm(transcript_text, transcript_data, video_duration)
+            total_sections = len(sections_data)
+            
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'sections', 'message': f'Found {total_sections} sections', 'progress': 25, 'totalSections': total_sections})}\n\n"
+            
+            # Generate topic-specific loading messages from section titles
+            section_titles = [s.get('title', f'Section {i+1}') for i, s in enumerate(sections_data)]
+            subject = section_titles[0] if section_titles else "this video"
+            loading_messages = generate_loading_messages(subject, section_titles)
+            
+            # Send loading messages to client
+            yield f"data: {json.dumps({'type': 'loading_messages', 'messages': loading_messages, 'section_titles': section_titles, 'subject': subject})}\n\n"
+            
+            # Generate all sections with progress updates (quiz only for first few)
+            FULL_QUIZ_SECTIONS = 4
+            all_sections_html = []
+            for i in range(total_sections):
+                section_title = sections_data[i].get('title', f'Section {i + 1}')
+                progress = 30 + int((i / total_sections) * 65)  # 30-95%
+                generate_quiz = i < FULL_QUIZ_SECTIONS
+                
+                yield f"data: {json.dumps({'type': 'progress', 'stage': 'generating', 'message': f'Section {i + 1}/{total_sections}: {section_title}', 'progress': progress, 'currentSection': i + 1, 'totalSections': total_sections})}\n\n"
+                
+                html = generate_section_html(sections_data[i], i, total_sections, video_id, generate_quiz=generate_quiz)
+                all_sections_html.append(html)
+            
+            final_html = "".join(all_sections_html)
+            
+            # Build section metadata
+            sections_meta = []
+            for i, section in enumerate(sections_data):
+                sections_meta.append({
+                    'index': i,
+                    'timestamp': section['timestamp'],
+                    'title': section.get('title', f'Section {i + 1}'),
+                    'loaded': True
+                })
+            
+            yield f"data: {json.dumps({'type': 'progress', 'stage': 'complete', 'message': 'Complete!', 'progress': 100})}\n\n"
+            
+            # Send final result
+            result = {
+                'type': 'result',
+                'summary': final_html,
+                'transcript': transcript_text,
+                'video_id': video_id,
+                'total_sections': total_sections,
+                'sections_meta': sections_meta
+            }
+            yield f"data: {json.dumps(result)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.post("/api/sections/batch")
+async def get_sections_batch(request: SectionBatchRequest):
+    """Load a batch of sections on demand."""
+    logger.info(f"Batch request for video {request.video_id}: {len(request.sections)} sections")
+    
+    try:
+        video_id = request.video_id
+        results = []
+        
+        for section_data in request.sections:
+            section_index = section_data['index']
+            logger.info(f"  Generating section {section_index + 1}...")
+            
+            html = generate_section_html(section_data, section_index, len(request.sections), video_id)
+            results.append({
+                'index': section_index,
+                'html': html
+            })
+        
+        logger.info(f"✅ Batch complete: {len(results)} sections")
+        return {"sections": results}
+        
+    except Exception as e:
+        logger.error(f"Batch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class QuizGenerateRequest(BaseModel):
+    section_title: str
+    section_content: str
+
+@app.post("/api/section/quiz")
+async def generate_section_quiz_on_demand(request: QuizGenerateRequest):
+    """Generate quiz questions for a section on demand."""
+    logger.info(f"On-demand quiz request for: {request.section_title}")
+    
+    try:
+        # Generate questions
+        questions = generate_section_questions(request.section_content, request.section_title)
+        quiz_questions = generate_quiz_questions(request.section_content, request.section_title)
+        
+        return {
+            "user_questions": questions,
+            "quiz_questions": quiz_questions
+        }
+        
+    except Exception as e:
+        logger.error(f"Quiz generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/chat")
 async def chat_with_section(request: ChatRequest):

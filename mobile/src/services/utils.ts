@@ -16,19 +16,50 @@ export const extractVideoId = (url: string): string | null => {
 export const parseSummaryHTML = (html: string): VideoSection[] => {
   const sections: VideoSection[] = [];
   
-  const sectionRegex = /<div class="video-section" data-section-id="(\d+)">([\s\S]*?)(?=<div class="video-section"|$)/g;
+  console.log('📝 parseSummaryHTML called, HTML length:', html?.length || 0);
+  
+  if (!html || html.length === 0) {
+    console.log('❌ Empty HTML received');
+    return sections;
+  }
+  
+  // Match video-section with optional additional classes (loaded, skeleton, etc.)
+  const sectionRegex = /<div class="video-section([^"]*)" data-section-id="(\d+)"[^>]*>([\s\S]*?)(?=<div class="video-section|$)/g;
   const sectionMatches = Array.from(html.matchAll(sectionRegex));
   
+  console.log('📝 Regex matches found:', sectionMatches.length);
+  
   for (const match of sectionMatches) {
-    const sectionId = parseInt(match[1]);
-    let sectionHTML = match[2].replace(/<\/div>\s*$/, '');
+    const classes = match[1];
+    const sectionId = parseInt(match[2]);
+    let sectionHTML = match[3].replace(/<\/div>\s*$/, '');
+    
+    console.log(`📝 Section ${sectionId}: classes="${classes}", HTML length: ${sectionHTML.length}`);
+    
+    // Skip skeleton sections (they're placeholders for lazy loading)
+    if (classes.includes('skeleton')) {
+      console.log(`⏭️ Skipping skeleton section ${sectionId}`);
+      continue;
+    }
+    
+    // Check if quiz is already loaded or needs lazy loading
+    const hasQuizMatch = match[0].match(/data-has-quiz="(true|false)"/);
+    const hasQuiz = hasQuizMatch ? hasQuizMatch[1] === 'true' : true;
+    
+    // Get content from data attribute if available
+    const contentMatch = match[0].match(/data-content="([^"]*)"/);
+    const dataContent = contentMatch ? contentMatch[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&') : '';
+    
+    // Get title from data attribute
+    const dataTitleMatch = match[0].match(/data-title="([^"]*)"/);
+    const dataTitle = dataTitleMatch ? dataTitleMatch[1] : '';
     
     const titleMatch = sectionHTML.match(/<h2><a[^>]*>([^<]+)<\/a><\/h2>/);
     const title = titleMatch ? titleMatch[1] : `Section ${sectionId}`;
     
     const timestampMatch = title.match(/^(\d+:\d+(?::\d+)?)\s*-\s*(.+)$/);
     const timestamp = timestampMatch ? timestampMatch[1] : '0:00';
-    const sectionTitle = timestampMatch ? timestampMatch[2] : title;
+    const sectionTitle = timestampMatch ? timestampMatch[2] : (dataTitle || title);
     const timestampSeconds = parseTimestamp(timestamp);
     
     const summaryMatch = sectionHTML.match(/<p>([\s\S]*?)<\/p>/);
@@ -55,12 +86,16 @@ export const parseSummaryHTML = (html: string): VideoSection[] => {
       timestamp,
       timestampSeconds,
       summary: summary || 'No summary',
-      content: summary || 'No content', // Store full content for AI context
+      content: dataContent || summary || 'No content', // Use data-content if available
       userQuestions: userQuestions.slice(0, 3),
       quizQuestions: quizQuestions.slice(0, 3),
+      hasQuiz,
     });
+    
+    console.log(`✅ Parsed section ${sectionId}: "${sectionTitle}" at ${timestamp}, hasQuiz: ${hasQuiz}`);
   }
   
+  console.log(`📝 Total sections parsed: ${sections.length}`);
   return sections;
 };
 

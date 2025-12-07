@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, Dimensions } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, Dimensions, ActivityIndicator } from 'react-native';
 import { Colors, Spacing, BorderRadius, FontSizes, FontWeights, Shadows } from '../styles/theme';
 import { VideoSection, QuizQuestion, ChatMessage } from '../types';
 import { QuestionBubble } from './QuestionBubble';
 import { ChatInterface } from './ChatInterface';
 import { QuizInterface } from './QuizInterface';
+import ApiService from '../services/api';
 
 const screenHeight = Dimensions.get('window').height;
 
@@ -18,13 +19,83 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
   const [quizVisible, setQuizVisible] = useState(false);
   const [selectedQuizIndex, setSelectedQuizIndex] = useState(0);
   const [initialQuestion, setInitialQuestion] = useState<string | undefined>(undefined);
-  const [userQuestions, setUserQuestions] = useState(section.userQuestions);
-  const [quizQuestions, setQuizQuestions] = useState(section.quizQuestions);
+  const [userQuestions, setUserQuestions] = useState<string[]>([]);
+  const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>([]);
   const [quizStatuses, setQuizStatuses] = useState<Record<number, 'correct' | 'incorrect' | null>>({});
   const [answeredCount, setAnsweredCount] = useState(0);
   
+  // Track expanded state and loading for each section
+  const [askAiExpanded, setAskAiExpanded] = useState(false);
+  const [askMeExpanded, setAskMeExpanded] = useState(false);
+  const [loadingAskAi, setLoadingAskAi] = useState(false);
+  const [loadingAskMe, setLoadingAskMe] = useState(false);
+  
   // Persist chat conversation history (like web's chatStates[sectionId])
   const [conversationHistory, setConversationHistory] = useState<ChatMessage[]>([]);
+
+  // Generate questions on-demand when "Ask AI" is clicked
+  const handleAskAiClick = async () => {
+    if (askAiExpanded) {
+      // Already expanded, just collapse
+      setAskAiExpanded(false);
+      return;
+    }
+    
+    if (userQuestions.length > 0) {
+      // Already have questions, just expand
+      setAskAiExpanded(true);
+      return;
+    }
+    
+    // Generate questions
+    setLoadingAskAi(true);
+    try {
+      console.log('💭 Generating Ask AI questions for:', section.title);
+      const result = await ApiService.generateQuizForSection(section.title, section.content);
+      setUserQuestions(result.user_questions);
+      if (result.quiz_questions.length > 0) {
+        setQuizQuestions(result.quiz_questions);
+      }
+      setAskAiExpanded(true);
+      console.log('✅ Got', result.user_questions.length, 'user questions');
+    } catch (error) {
+      console.error('Failed to generate questions:', error);
+    } finally {
+      setLoadingAskAi(false);
+    }
+  };
+
+  // Generate quiz questions on-demand when "Ask Me" is clicked
+  const handleAskMeClick = async () => {
+    if (askMeExpanded) {
+      // Already expanded, just collapse
+      setAskMeExpanded(false);
+      return;
+    }
+    
+    if (quizQuestions.length > 0) {
+      // Already have questions, just expand
+      setAskMeExpanded(true);
+      return;
+    }
+    
+    // Generate questions
+    setLoadingAskMe(true);
+    try {
+      console.log('🎯 Generating Ask Me questions for:', section.title);
+      const result = await ApiService.generateQuizForSection(section.title, section.content);
+      setQuizQuestions(result.quiz_questions);
+      if (result.user_questions.length > 0) {
+        setUserQuestions(result.user_questions);
+      }
+      setAskMeExpanded(true);
+      console.log('✅ Got', result.quiz_questions.length, 'quiz questions');
+    } catch (error) {
+      console.error('Failed to generate questions:', error);
+    } finally {
+      setLoadingAskMe(false);
+    }
+  };
 
   // Handle clicking a user question - opens chat and auto-asks the question (like web)
   const handleUserQuestionPress = (question: string) => {
@@ -88,17 +159,6 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
 
   return (
     <View style={styles.container}>
-      {/* Chat button - floating */}
-      <TouchableOpacity style={styles.chatButton} onPress={handleChatButtonPress}>
-        <Text style={styles.chatButtonText}>💬</Text>
-        {/* Show badge if there's conversation history */}
-        {conversationHistory.length > 0 && (
-          <View style={styles.chatBadge}>
-            <Text style={styles.chatBadgeText}>{Math.ceil(conversationHistory.length / 2)}</Text>
-          </View>
-        )}
-      </TouchableOpacity>
-
       {/* Scrollable content inside card */}
       <ScrollView 
         style={styles.scrollContent} 
@@ -113,39 +173,85 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
 
         <Text style={styles.summary}>{section.summary}</Text>
 
+        {/* Ask AI - clickable header */}
         <View style={styles.questionsWrapper}>
-          <Text style={styles.label}>💭 Ask AI:</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.questionsContent}>
-            {userQuestions.map((q, idx) => (
-              <QuestionBubble 
-                key={idx} 
-                text={q} 
-                onPress={() => handleUserQuestionPress(q)} 
-                type="user" 
-              />
-            ))}
-          </ScrollView>
+          <TouchableOpacity 
+            style={styles.sectionHeader} 
+            onPress={handleAskAiClick}
+            disabled={loadingAskAi}
+          >
+            <Text style={styles.sectionHeaderText}>💭 Ask AI</Text>
+            {loadingAskAi && <ActivityIndicator size="small" color={Colors.primary} style={styles.headerLoader} />}
+            {!loadingAskAi && <Text style={styles.expandIcon}>{askAiExpanded ? '▼' : '▶'}</Text>}
+          </TouchableOpacity>
+          
+          {askAiExpanded && userQuestions.length > 0 && (
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false} 
+              contentContainerStyle={styles.questionsContent}
+              nestedScrollEnabled={true}
+              directionalLockEnabled={true}
+            >
+              {userQuestions.map((q, idx) => (
+                <QuestionBubble 
+                  key={idx} 
+                  text={q} 
+                  onPress={() => handleUserQuestionPress(q)} 
+                  type="user" 
+                />
+              ))}
+            </ScrollView>
+          )}
         </View>
 
+        {/* Ask Me - clickable header (quiz questions) */}
         <View style={styles.questionsWrapper}>
-          <Text style={styles.label}>🎯 Test:</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.questionsContent}>
-            {quizQuestions.map((quiz, idx) => (
-              <QuestionBubble 
-                key={idx} 
-                text={quiz.question} 
-                onPress={() => { setSelectedQuizIndex(idx); setQuizVisible(true); }} 
-                type="quiz" 
-                status={quizStatuses[idx]} 
-                used={!!quizStatuses[idx]} 
-              />
-            ))}
-          </ScrollView>
+          <TouchableOpacity 
+            style={styles.sectionHeader} 
+            onPress={handleAskMeClick}
+            disabled={loadingAskMe}
+          >
+            <Text style={styles.sectionHeaderText}>🎯 Ask Me</Text>
+            {loadingAskMe && <ActivityIndicator size="small" color={Colors.primary} style={styles.headerLoader} />}
+            {!loadingAskMe && <Text style={styles.expandIcon}>{askMeExpanded ? '▼' : '▶'}</Text>}
+          </TouchableOpacity>
+          
+          {askMeExpanded && quizQuestions.length > 0 && (
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false} 
+              contentContainerStyle={styles.questionsContent}
+              nestedScrollEnabled={true}
+              directionalLockEnabled={true}
+            >
+              {quizQuestions.map((quiz, idx) => (
+                <QuestionBubble 
+                  key={idx} 
+                  text={quiz.question} 
+                  onPress={() => { setSelectedQuizIndex(idx); setQuizVisible(true); }} 
+                  type="quiz" 
+                  status={quizStatuses[idx]} 
+                  used={!!quizStatuses[idx]} 
+                />
+              ))}
+            </ScrollView>
+          )}
         </View>
         
         {/* Extra padding at bottom for scroll */}
         <View style={{ height: 20 }} />
       </ScrollView>
+
+      {/* Chat button - floating (moved outside ScrollView for proper z-index) */}
+      <TouchableOpacity style={styles.chatButton} onPress={handleChatButtonPress}>
+        <Text style={styles.chatButtonText}>💬</Text>
+        {conversationHistory.length > 0 && (
+          <View style={styles.chatBadge}>
+            <Text style={styles.chatBadgeText}>{Math.ceil(conversationHistory.length / 2)}</Text>
+          </View>
+        )}
+      </TouchableOpacity>
 
       {/* Chat Modal - slides up from bottom, 65% height */}
       <Modal 
@@ -199,7 +305,7 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white, 
     borderRadius: BorderRadius.md, 
     ...Shadows.medium,
-    overflow: 'hidden',
+    position: 'relative',
   },
   scrollContent: {
     flex: 1,
@@ -261,13 +367,27 @@ const styles = StyleSheet.create({
     fontWeight: FontWeights.bold,
   },
   questionsWrapper: { marginTop: Spacing.sm },
-  label: { 
-    fontSize: FontSizes.xs, 
-    fontWeight: FontWeights.semibold, 
-    color: Colors.primary, 
-    marginBottom: Spacing.xs, 
-    textTransform: 'uppercase', 
-    letterSpacing: 0.5 
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.background,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: BorderRadius.sm,
+    marginBottom: Spacing.xs,
+  },
+  sectionHeaderText: {
+    fontSize: FontSizes.sm,
+    fontWeight: FontWeights.semibold,
+    color: Colors.primary,
+    flex: 1,
+  },
+  expandIcon: {
+    fontSize: 12,
+    color: Colors.textSecondary,
+  },
+  headerLoader: {
+    marginLeft: Spacing.sm,
   },
   questionsContent: { paddingVertical: Spacing.xs },
   // Modal styles - 65% height, slides up from bottom

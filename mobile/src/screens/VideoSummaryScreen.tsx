@@ -18,12 +18,16 @@ import { VideoPlayer, VideoPlayerRef } from '../components/VideoPlayer';
 import { SectionCard } from '../components/SectionCard';
 import { VideoSection } from '../types';
 
-const { width: screenWidth } = Dimensions.get('window');
+const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+// Card height: more compact - approximately 40% of screen height
+const cardHeight = Math.min(screenHeight * 0.38, 320);
 
 export const VideoSummaryScreen = () => {
   const navigation = useNavigation();
   const { videoId, sections, transcript } = useApp();
   const [transcriptVisible, setTranscriptVisible] = useState(false);
+  
+  console.log('🎬 VideoSummaryScreen render - videoId:', videoId, 'sections:', sections?.length, 'transcript:', transcript?.length);
   const [currentIndex, setCurrentIndex] = useState(0);
   const videoPlayerRef = useRef<VideoPlayerRef>(null);
   const flatListRef = useRef<FlatList>(null);
@@ -38,24 +42,34 @@ export const VideoSummaryScreen = () => {
     }
   };
 
+  // Card width including padding
+  const cardWidth = screenWidth - 32;
+  
+  // Update index on scroll (for visual feedback)
+  const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const index = Math.round(offsetX / cardWidth);
+    if (index !== currentIndex && index >= 0 && index < sections.length) {
+      setCurrentIndex(index);
+    }
+  }, [currentIndex, sections.length, cardWidth]);
+
   // When swipe completes, seek video to new section's timestamp
   const onMomentumScrollEnd = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const index = Math.round(event.nativeEvent.contentOffset.x / (screenWidth - 32));
-    console.log('📜 Scroll ended, calculated index:', index, 'current:', currentIndex);
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const index = Math.round(offsetX / cardWidth);
+    console.log('📜 Scroll ended, offsetX:', offsetX, 'cardWidth:', cardWidth, 'index:', index);
     
-    if (index !== currentIndex && index >= 0 && index < sections.length) {
+    if (index >= 0 && index < sections.length) {
       setCurrentIndex(index);
       const section = sections[index];
       console.log(`🔄 Swiped to section ${index}: ${section.title}, seeking to ${section.timestampSeconds}s`);
       
       if (videoPlayerRef.current) {
-        console.log('📹 videoPlayerRef exists, calling seekTo');
         videoPlayerRef.current.seekTo(section.timestampSeconds);
-      } else {
-        console.log('❌ videoPlayerRef is null!');
       }
     }
-  }, [currentIndex, sections]);
+  }, [sections, cardWidth]);
 
   // Navigate to specific section
   const goToSection = (index: number) => {
@@ -66,19 +80,30 @@ export const VideoSummaryScreen = () => {
     }
   };
 
-  const renderSectionCard = ({ item, index }: { item: VideoSection; index: number }) => (
-    <View style={styles.cardWrapper}>
-      <SectionCard 
-        section={item} 
-        onTimestampPress={handleTimestampPress}
-      />
-    </View>
-  );
+  const renderSectionCard = ({ item, index }: { item: VideoSection; index: number }) => {
+    console.log('🃏 Rendering card', index, ':', item?.title);
+    return (
+      <View style={styles.cardWrapper}>
+        <SectionCard 
+          section={item} 
+          onTimestampPress={handleTimestampPress}
+        />
+      </View>
+    );
+  };
 
   if (!videoId) {
     return (
       <View style={styles.container}>
         <Text style={styles.errorText}>No video loaded</Text>
+      </View>
+    );
+  }
+
+  if (!sections || sections.length === 0) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.errorText}>No sections found. Please try again.</Text>
       </View>
     );
   }
@@ -129,14 +154,16 @@ export const VideoSummaryScreen = () => {
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
+        onScroll={onScroll}
         onMomentumScrollEnd={onMomentumScrollEnd}
-        snapToInterval={screenWidth - 32}
+        scrollEventThrottle={16}
+        snapToInterval={cardWidth}
         snapToAlignment="center"
         decelerationRate="fast"
         contentContainerStyle={styles.flatListContent}
         getItemLayout={(_, index) => ({
-          length: screenWidth - 32,
-          offset: (screenWidth - 32) * index,
+          length: cardWidth,
+          offset: cardWidth * index,
           index,
         })}
       />
@@ -217,6 +244,7 @@ const styles = StyleSheet.create({
   },
   cardWrapper: {
     width: screenWidth - 32,
+    height: cardHeight,
     paddingRight: Spacing.md,
   },
   

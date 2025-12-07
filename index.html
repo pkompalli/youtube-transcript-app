@@ -29,6 +29,19 @@
 
             <div id="error" class="error" style="display: none;"></div>
 
+            <!-- Full-screen loader overlay -->
+            <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+                <div class="loading-content">
+                    <div class="loading-spinner"></div>
+                    <h3 id="loadingTitle">Processing Video</h3>
+                    <p id="loadingStatus">Fetching transcript...</p>
+                    <div class="loading-progress">
+                        <div class="progress-bar" id="progressBar"></div>
+                    </div>
+                    <p id="loadingDetail" class="loading-detail"></p>
+                </div>
+            </div>
+
             <div id="contentWrapper" style="display: none;">
                 <div id="videoContainer" class="video-container">
                     <div class="video-wrapper">
@@ -65,9 +78,31 @@
         let transcriptVisible = false;
         let player = null;
         let videoId = null;
+        let sectionsMeta = [];
+        let isLoadingSections = false;
+        let loadingQueue = [];
 
         function onYouTubeIframeAPIReady() {
             console.log('YouTube API ready');
+        }
+
+        // Loader management
+        function showLoader(title, status, progress = 0) {
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.style.display = 'flex';
+            document.getElementById('loadingTitle').textContent = title;
+            document.getElementById('loadingStatus').textContent = status;
+            document.getElementById('progressBar').style.width = `${progress}%`;
+        }
+
+        function updateLoader(status, progress, detail = '') {
+            document.getElementById('loadingStatus').textContent = status;
+            document.getElementById('progressBar').style.width = `${progress}%`;
+            document.getElementById('loadingDetail').textContent = detail;
+        }
+
+        function hideLoader() {
+            document.getElementById('loadingOverlay').style.display = 'none';
         }
 
         function initializePlayer(vid) {
@@ -113,24 +148,102 @@
             btn.disabled = true;
             btnText.style.display = 'none';
             loader.style.display = 'inline-block';
+            
+            // Show full-screen loader
+            showLoader('Processing Video', 'Fetching transcript...', 5);
 
             try {
-                const response = await fetch('/api/transcript', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
-                });
-
-                const data = await response.json();
-
+                console.log('Starting fetch...');
+                updateLoader('Analyzing video content...', 15, 'This may take several minutes for long videos');
+                
+                const fetchStartTime = Date.now();
+                
+                // Start a timer to show progress
+                let progress = 15;
+                const progressTimer = setInterval(() => {
+                    progress = Math.min(progress + 1, 85);
+                    const mins = Math.floor((Date.now() - fetchStartTime) / 60000);
+                    const secs = Math.floor(((Date.now() - fetchStartTime) % 60000) / 1000);
+                    updateLoader('Processing sections...', progress, `Generating summaries and quizzes... (${mins}:${secs.toString().padStart(2, '0')})`);
+                }, 2000);
+                
+                // 20 minute timeout for very long videos
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => {
+                    controller.abort();
+                    console.error('Request timed out after 20 minutes');
+                }, 1200000);
+                
+                let response;
+                try {
+                    response = await fetch('/api/transcript', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url }),
+                        signal: controller.signal
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+                
+                clearInterval(progressTimer);
+                console.log('Response received, status:', response.status);
+                updateLoader('Receiving data...', 90);
+                
                 if (!response.ok) {
-                    throw new Error(data.detail || 'Failed to process video');
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.detail || `Server error: ${response.status}`);
+                }
+                
+                const responseText = await response.text();
+                console.log('Response text length:', responseText.length);
+                
+                let data;
+                try {
+                    data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('JSON parse error:', parseError);
+                    throw new Error('Failed to parse server response');
                 }
 
-                videoId = extractVideoId(url);
+                const totalSections = data.total_sections || 0;
+                const summaryLength = data.summary?.length || 0;
+                console.log(`✅ Received ${totalSections} sections, ${summaryLength} chars`);
+                
+                if (!data.summary || summaryLength === 0) {
+                    throw new Error('Server returned empty summary');
+                }
+                
+                updateLoader('Rendering content...', 95, `${totalSections} sections ready`);
+
+                videoId = data.video_id || extractVideoId(url);
+                console.log('Video ID:', videoId);
+                
+                // Show content wrapper FIRST
+                const contentWrapper = document.getElementById('contentWrapper');
+                contentWrapper.style.display = 'block';
+                console.log('✅ Content wrapper visible');
+                
+                // Render sections
+                const summaryDiv = document.getElementById('summary');
+                console.log('Setting innerHTML, length:', summaryLength);
+                summaryDiv.innerHTML = data.summary;
+                console.log('✅ Summary HTML set, children:', summaryDiv.children.length);
+                
+                // Setup timestamp links
+                setupTimestampLinks(summaryDiv);
+                console.log('✅ Timestamp links setup');
+                
+                // Set transcript
+                const transcriptEl = document.getElementById('transcript');
+                transcriptEl.textContent = data.transcript || 'Transcript not available';
+                transcriptVisible = false;
+                transcriptEl.style.display = 'none';
+                document.getElementById('toggleText').textContent = 'Show';
+                console.log('✅ Transcript set');
+                
+                // Initialize YouTube player AFTER content is ready
                 if (videoId) {
-                    document.getElementById('contentWrapper').style.display = 'block';
-                    
                     if (typeof YT !== 'undefined' && YT.Player) {
                         initializePlayer(videoId);
                     } else {
@@ -143,36 +256,406 @@
                     }
                 }
 
-                const summaryDiv = document.getElementById('summary');
-                summaryDiv.innerHTML = data.summary;
+                console.log('✅ All rendering complete, hiding loader');
+                updateLoader('Done!', 100);
                 
-                const links = summaryDiv.querySelectorAll('a[href*="&t="]');
-                links.forEach((link) => {
-                    const href = link.getAttribute('href');
-                    const match = href.match(/[?&]t=(\d+)s?/);
-                    if (match) {
-                        const seconds = parseInt(match[1]);
-                        link.href = '#';
-                        link.onclick = (e) => {
-                            e.preventDefault();
-                            seekTo(seconds);
-                            return false;
-                        };
-                    }
-                });
-                
-                document.getElementById('transcript').textContent = data.transcript;
-
-                transcriptVisible = false;
-                document.getElementById('transcript').style.display = 'none';
-                document.getElementById('toggleText').textContent = 'Show';
+                // Hide loader and scroll
+                hideLoader();
+                contentWrapper.scrollIntoView({ behavior: 'smooth' });
+                console.log('✅ DONE - UI should be visible now');
 
             } catch (error) {
-                showError(error.message);
+                console.error('Error in summarize:', error);
+                console.error('Stack:', error.stack);
+                hideLoader();
+                
+                let errorMsg = error.message || 'An unexpected error occurred.';
+                if (error.name === 'AbortError') {
+                    errorMsg = 'Request timed out. The video may be too long. Try a shorter video or check your server.';
+                } else if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError')) {
+                    errorMsg = 'Network error. Make sure the server is running at localhost:8000';
+                }
+                showError(errorMsg);
             } finally {
                 btn.disabled = false;
                 btnText.style.display = 'inline';
                 loader.style.display = 'none';
+            }
+        }
+
+        function setupTimestampLinks(container) {
+            const links = container.querySelectorAll('a[href*="&t="]');
+            links.forEach((link) => {
+                const href = link.getAttribute('href');
+                const match = href.match(/[?&]t=(\d+)s?/);
+                if (match) {
+                    const seconds = parseInt(match[1]);
+                    link.href = '#';
+                    link.onclick = (e) => {
+                        e.preventDefault();
+                        seekTo(seconds);
+                        return false;
+                    };
+                }
+            });
+        }
+
+        // Lazy loading for remaining sections
+        function startLazyLoading() {
+            // Get unloaded sections
+            const unloadedSections = sectionsMeta.filter(s => !s.loaded);
+            if (unloadedSections.length === 0) return;
+
+            // Use IntersectionObserver for scroll-based loading
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const sectionEl = entry.target;
+                        const sectionId = parseInt(sectionEl.dataset.sectionId);
+                        
+                        if (sectionEl.dataset.loaded === 'false') {
+                            loadSectionBatch([sectionId]);
+                            observer.unobserve(sectionEl);
+                        }
+                    }
+                });
+            }, { rootMargin: '200px' }); // Start loading 200px before visible
+
+            // Observe skeleton sections
+            document.querySelectorAll('.video-section.skeleton').forEach(el => {
+                observer.observe(el);
+            });
+
+            // Also start background loading after 2 seconds
+            setTimeout(() => {
+                loadSectionsInBackground();
+            }, 2000);
+        }
+
+        async function loadSectionsInBackground() {
+            const unloaded = sectionsMeta.filter(s => !s.loaded);
+            if (unloaded.length === 0 || isLoadingSections) return;
+
+            // Load in batches of 3
+            const batchSize = 3;
+            for (let i = 0; i < unloaded.length; i += batchSize) {
+                const batch = unloaded.slice(i, i + batchSize);
+                const indices = batch.map(s => s.index);
+                
+                // Check if already loaded by scroll
+                const stillNeeded = indices.filter(idx => {
+                    const el = document.querySelector(`.video-section[data-section-id="${idx}"]`);
+                    return el && el.dataset.loaded === 'false';
+                });
+
+                if (stillNeeded.length > 0) {
+                    await loadSectionBatch(stillNeeded);
+                    // Small delay between batches to not overwhelm
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
+        }
+
+        async function loadSectionBatch(indices) {
+            if (isLoadingSections) {
+                loadingQueue.push(...indices);
+                return;
+            }
+
+            isLoadingSections = true;
+            
+            try {
+                // Get section data for these indices
+                const sectionsToLoad = indices.map(idx => sectionsMeta.find(s => s.index === idx)).filter(Boolean);
+                
+                if (sectionsToLoad.length === 0) {
+                    isLoadingSections = false;
+                    return;
+                }
+
+                console.log(`Loading sections: ${indices.join(', ')}`);
+
+                const response = await fetch('/api/sections/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        video_id: videoId,
+                        sections: sectionsToLoad
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load sections');
+                }
+
+                const data = await response.json();
+                
+                // Replace skeleton sections with loaded content
+                data.sections.forEach(section => {
+                    const sectionEl = document.querySelector(`.video-section[data-section-id="${section.index}"]`);
+                    if (sectionEl) {
+                        // Create temp container to parse HTML
+                        const temp = document.createElement('div');
+                        temp.innerHTML = section.html;
+                        const newSection = temp.firstElementChild;
+                        
+                        // Replace skeleton with loaded section
+                        sectionEl.replaceWith(newSection);
+                        
+                        // Setup timestamp links for this section
+                        setupTimestampLinks(newSection);
+                        
+                        // Mark as loaded in metadata
+                        const meta = sectionsMeta.find(s => s.index === section.index);
+                        if (meta) meta.loaded = true;
+                    }
+                });
+
+                console.log(`✅ Loaded ${data.sections.length} sections`);
+
+            } catch (error) {
+                console.error('Error loading sections:', error);
+            } finally {
+                isLoadingSections = false;
+                
+                // Process queue if any
+                if (loadingQueue.length > 0) {
+                    const next = loadingQueue.splice(0, 3);
+                    loadSectionBatch(next);
+                }
+            }
+        }
+
+        // Load quiz on demand for sections that don't have pre-generated quiz
+        async function loadQuizForSection(sectionId) {
+            const section = document.querySelector(`.video-section[data-section-id="${sectionId}"]`);
+            if (!section) return;
+            
+            const loadingEl = document.getElementById(`quiz-loading-${sectionId}`);
+            const lazyContainer = section.querySelector('.lazy-quiz-container');
+            const btn = lazyContainer?.querySelector('.test-understanding-btn');
+            
+            if (loadingEl) loadingEl.style.display = 'flex';
+            if (btn) btn.style.display = 'none';
+            
+            try {
+                const sectionTitle = section.dataset.title || `Section ${sectionId + 1}`;
+                const sectionContent = section.dataset.content || section.querySelector('p')?.textContent || '';
+                
+                console.log(`Loading quiz for section ${sectionId}: ${sectionTitle}`);
+                
+                const response = await fetch('/api/section/quiz', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        section_title: sectionTitle,
+                        section_content: sectionContent
+                    })
+                });
+                
+                if (!response.ok) throw new Error('Failed to load quiz');
+                
+                const data = await response.json();
+                console.log('Quiz loaded:', data);
+                
+                // Build quiz HTML
+                let quizHtml = '<div class="chat-starters-wrapper">';
+                quizHtml += '<div class="starters-label">💭 Ask the AI:</div>';
+                quizHtml += `<div class="chat-starters" id="chat-starters-${sectionId}">`;
+                
+                data.user_questions.forEach((q, idx) => {
+                    quizHtml += `<button class="starter-question-btn" onclick="askQuestion(${sectionId}, ${idx}, this)">${q}</button>`;
+                });
+                
+                quizHtml += '</div><div class="starters-label">🎯 Test yourself:</div>';
+                quizHtml += `<div class="quiz-starters" id="quiz-starters-${sectionId}">`;
+                
+                data.quiz_questions.forEach((quiz, idx) => {
+                    const escaped = JSON.stringify(quiz).replace(/"/g, '&quot;');
+                    quizHtml += `<button class="quiz-question-btn" onclick="startQuiz(${sectionId}, ${idx}, this)" data-quiz="${escaped}">${quiz.question}</button>`;
+                });
+                
+                quizHtml += '</div></div>';
+                
+                // Replace the lazy container with actual quiz
+                const lazyQuizEl = document.getElementById(`lazy-quiz-${sectionId}`);
+                if (lazyQuizEl) {
+                    lazyQuizEl.innerHTML = quizHtml;
+                }
+                if (loadingEl) loadingEl.style.display = 'none';
+                
+                // Mark section as having quiz
+                section.dataset.hasQuiz = 'true';
+                
+            } catch (error) {
+                console.error('Error loading quiz:', error);
+                if (loadingEl) loadingEl.innerHTML = '<span style="color: red;">Failed to load quiz. Click to retry.</span>';
+                if (btn) btn.style.display = 'flex';
+            }
+        }
+
+        // Track expanded state for each section
+        const sectionExpandState = {};
+
+        // Toggle Ask AI section - generate questions on first click
+        async function toggleAskAI(sectionId) {
+            const questionsContainer = document.getElementById(`ask-ai-questions-${sectionId}`);
+            const icon = document.getElementById(`ask-ai-icon-${sectionId}`);
+            const loader = document.getElementById(`ask-ai-loader-${sectionId}`);
+            
+            if (!sectionExpandState[sectionId]) sectionExpandState[sectionId] = { askAi: false, askMe: false };
+            
+            // If already expanded, just collapse
+            if (sectionExpandState[sectionId].askAi) {
+                questionsContainer.style.display = 'none';
+                icon.textContent = '▶';
+                sectionExpandState[sectionId].askAi = false;
+                return;
+            }
+            
+            // If already has content, just expand
+            if (questionsContainer.innerHTML.trim()) {
+                questionsContainer.style.display = 'flex';
+                icon.textContent = '▼';
+                sectionExpandState[sectionId].askAi = true;
+                return;
+            }
+            
+            // Generate questions
+            icon.style.display = 'none';
+            loader.style.display = 'inline-block';
+            
+            try {
+                const section = document.querySelector(`.video-section[data-section-id="${sectionId}"]`);
+                const sectionTitle = section?.dataset.title || `Section ${sectionId + 1}`;
+                const sectionContent = section?.dataset.content || section?.querySelector('p')?.textContent || '';
+                
+                const response = await fetch('/api/section/quiz', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ section_title: sectionTitle, section_content: sectionContent })
+                });
+                
+                if (!response.ok) throw new Error('Failed to load questions');
+                const data = await response.json();
+                
+                // Store quiz questions for Ask Me section too
+                if (!sectionExpandState[sectionId].quizData) {
+                    sectionExpandState[sectionId].quizData = data.quiz_questions;
+                }
+                
+                // Build Ask AI questions HTML
+                let html = '';
+                data.user_questions.forEach((q, idx) => {
+                    html += `<button class="starter-question-btn" onclick="askQuestion(${sectionId}, ${idx}, this)">${q}</button>`;
+                });
+                
+                questionsContainer.innerHTML = html;
+                questionsContainer.style.display = 'flex';
+                icon.textContent = '▼';
+                icon.style.display = 'inline';
+                sectionExpandState[sectionId].askAi = true;
+                
+            } catch (error) {
+                console.error('Error loading Ask AI questions:', error);
+                questionsContainer.innerHTML = '<span style="color: red; padding: 8px;">Failed to load. Click header to retry.</span>';
+                questionsContainer.style.display = 'flex';
+            } finally {
+                loader.style.display = 'none';
+                icon.style.display = 'inline';
+            }
+        }
+
+        // Toggle Ask Me section - generate quiz questions on first click
+        async function toggleAskMe(sectionId) {
+            const questionsContainer = document.getElementById(`ask-me-questions-${sectionId}`);
+            const icon = document.getElementById(`ask-me-icon-${sectionId}`);
+            const loader = document.getElementById(`ask-me-loader-${sectionId}`);
+            
+            if (!sectionExpandState[sectionId]) sectionExpandState[sectionId] = { askAi: false, askMe: false };
+            
+            // If already expanded, just collapse
+            if (sectionExpandState[sectionId].askMe) {
+                questionsContainer.style.display = 'none';
+                icon.textContent = '▶';
+                sectionExpandState[sectionId].askMe = false;
+                return;
+            }
+            
+            // If already has content, just expand
+            if (questionsContainer.innerHTML.trim()) {
+                questionsContainer.style.display = 'flex';
+                icon.textContent = '▼';
+                sectionExpandState[sectionId].askMe = true;
+                return;
+            }
+            
+            // Check if we already have quiz data from Ask AI
+            if (sectionExpandState[sectionId].quizData) {
+                const data = sectionExpandState[sectionId].quizData;
+                let html = '';
+                data.forEach((quiz, idx) => {
+                    const escaped = JSON.stringify(quiz).replace(/"/g, '&quot;');
+                    html += `<button class="quiz-question-btn" onclick="startQuiz(${sectionId}, ${idx}, this)" data-quiz="${escaped}">${quiz.question}</button>`;
+                });
+                questionsContainer.innerHTML = html;
+                questionsContainer.style.display = 'flex';
+                icon.textContent = '▼';
+                sectionExpandState[sectionId].askMe = true;
+                return;
+            }
+            
+            // Generate questions
+            icon.style.display = 'none';
+            loader.style.display = 'inline-block';
+            
+            try {
+                const section = document.querySelector(`.video-section[data-section-id="${sectionId}"]`);
+                const sectionTitle = section?.dataset.title || `Section ${sectionId + 1}`;
+                const sectionContent = section?.dataset.content || section?.querySelector('p')?.textContent || '';
+                
+                const response = await fetch('/api/section/quiz', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ section_title: sectionTitle, section_content: sectionContent })
+                });
+                
+                if (!response.ok) throw new Error('Failed to load questions');
+                const data = await response.json();
+                
+                // Store for future use
+                sectionExpandState[sectionId].quizData = data.quiz_questions;
+                
+                // Also populate Ask AI if not done yet
+                const askAiContainer = document.getElementById(`ask-ai-questions-${sectionId}`);
+                if (askAiContainer && !askAiContainer.innerHTML.trim()) {
+                    let askAiHtml = '';
+                    data.user_questions.forEach((q, idx) => {
+                        askAiHtml += `<button class="starter-question-btn" onclick="askQuestion(${sectionId}, ${idx}, this)">${q}</button>`;
+                    });
+                    askAiContainer.innerHTML = askAiHtml;
+                }
+                
+                // Build Ask Me questions HTML
+                let html = '';
+                data.quiz_questions.forEach((quiz, idx) => {
+                    const escaped = JSON.stringify(quiz).replace(/"/g, '&quot;');
+                    html += `<button class="quiz-question-btn" onclick="startQuiz(${sectionId}, ${idx}, this)" data-quiz="${escaped}">${quiz.question}</button>`;
+                });
+                
+                questionsContainer.innerHTML = html;
+                questionsContainer.style.display = 'flex';
+                icon.textContent = '▼';
+                icon.style.display = 'inline';
+                sectionExpandState[sectionId].askMe = true;
+                
+            } catch (error) {
+                console.error('Error loading Ask Me questions:', error);
+                questionsContainer.innerHTML = '<span style="color: red; padding: 8px;">Failed to load. Click header to retry.</span>';
+                questionsContainer.style.display = 'flex';
+            } finally {
+                loader.style.display = 'none';
+                icon.style.display = 'inline';
             }
         }
 

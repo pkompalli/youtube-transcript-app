@@ -7,6 +7,7 @@ export interface VideoSection {
   content: string; // Full section content for AI context
   userQuestions: string[];
   quizQuestions: QuizQuestion[];
+  hasQuiz: boolean; // Whether quiz is loaded or needs to be fetched on demand
 }
 
 export interface QuizQuestion {
@@ -24,6 +25,9 @@ export interface ChatMessage {
 export interface TranscriptResponse {
   summary: string;
   transcript: string;
+  loading_messages?: string[];
+  section_titles?: string[];
+  subject?: string;
 }
 
 export interface ChatResponse {

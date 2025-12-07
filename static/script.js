@@ -76,7 +76,7 @@ async function loadVideo() {
         // Fetch transcript and summary with timeout
         console.log('Fetching transcript...');
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout for long videos
         
         try {
             const response = await fetch('/api/transcript', {
