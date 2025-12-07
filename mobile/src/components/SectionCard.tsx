@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, Dimensions, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, Dimensions, ActivityIndicator, TextInput } from 'react-native';
 import { Colors, Spacing, BorderRadius, FontSizes, FontWeights, Shadows } from '../styles/theme';
 import { VideoSection, QuizQuestion, ChatMessage } from '../types';
 import { QuestionBubble } from './QuestionBubble';
@@ -29,6 +29,7 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
   const [askMeExpanded, setAskMeExpanded] = useState(false);
   const [loadingAskAi, setLoadingAskAi] = useState(false);
   const [loadingAskMe, setLoadingAskMe] = useState(false);
+  const [freeTextInput, setFreeTextInput] = useState('');
   
   // Persist chat conversation history (like web's chatStates[sectionId])
   const [conversationHistory, setConversationHistory] = useState<ChatMessage[]>([]);
@@ -99,6 +100,15 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
 
   // Handle clicking a user question - opens chat and auto-asks the question (like web)
   const handleUserQuestionPress = (question: string) => {
+    setInitialQuestion(question);
+    setChatVisible(true);
+  };
+
+  // Handle free text submission
+  const handleFreeTextSubmit = () => {
+    if (!freeTextInput.trim()) return;
+    const question = freeTextInput.trim();
+    setFreeTextInput('');
     setInitialQuestion(question);
     setChatVisible(true);
   };
@@ -185,23 +195,46 @@ export const SectionCard: React.FC<SectionCardProps> = ({ section, onTimestampPr
             {!loadingAskAi && <Text style={styles.expandIcon}>{askAiExpanded ? '▼' : '▶'}</Text>}
           </TouchableOpacity>
           
-          {askAiExpanded && userQuestions.length > 0 && (
-            <ScrollView 
-              horizontal 
-              showsHorizontalScrollIndicator={false} 
-              contentContainerStyle={styles.questionsContent}
-              nestedScrollEnabled={true}
-              directionalLockEnabled={true}
-            >
-              {userQuestions.map((q, idx) => (
-                <QuestionBubble 
-                  key={idx} 
-                  text={q} 
-                  onPress={() => handleUserQuestionPress(q)} 
-                  type="user" 
+          {askAiExpanded && (
+            <>
+              {userQuestions.length > 0 && (
+                <ScrollView 
+                  horizontal 
+                  showsHorizontalScrollIndicator={false} 
+                  contentContainerStyle={styles.questionsContent}
+                  nestedScrollEnabled={true}
+                  directionalLockEnabled={true}
+                >
+                  {userQuestions.map((q, idx) => (
+                    <QuestionBubble 
+                      key={idx} 
+                      text={q} 
+                      onPress={() => handleUserQuestionPress(q)} 
+                      type="user" 
+                    />
+                  ))}
+                </ScrollView>
+              )}
+              {/* Free text input */}
+              <View style={styles.freeTextContainer}>
+                <TextInput
+                  style={styles.freeTextInput}
+                  placeholder="Or type your own question..."
+                  placeholderTextColor={Colors.textLight}
+                  value={freeTextInput}
+                  onChangeText={setFreeTextInput}
+                  onSubmitEditing={handleFreeTextSubmit}
+                  returnKeyType="send"
                 />
-              ))}
-            </ScrollView>
+                <TouchableOpacity 
+                  style={[styles.freeTextButton, !freeTextInput.trim() && styles.freeTextButtonDisabled]}
+                  onPress={handleFreeTextSubmit}
+                  disabled={!freeTextInput.trim()}
+                >
+                  <Text style={styles.freeTextButtonText}>Ask</Text>
+                </TouchableOpacity>
+              </View>
+            </>
           )}
         </View>
 
@@ -390,6 +423,38 @@ const styles = StyleSheet.create({
     marginLeft: Spacing.sm,
   },
   questionsContent: { paddingVertical: Spacing.xs },
+  freeTextContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.xs,
+    paddingHorizontal: 4,
+  },
+  freeTextInput: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs + 2,
+    fontSize: FontSizes.sm,
+    color: Colors.text,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+  },
+  freeTextButton: {
+    marginLeft: Spacing.xs,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs + 2,
+    borderRadius: BorderRadius.sm,
+  },
+  freeTextButtonDisabled: {
+    opacity: 0.5,
+  },
+  freeTextButtonText: {
+    color: Colors.white,
+    fontSize: FontSizes.sm,
+    fontWeight: FontWeights.semibold,
+  },
   // Modal styles - 65% height, slides up from bottom
   modalOverlay: { 
     flex: 1, 
